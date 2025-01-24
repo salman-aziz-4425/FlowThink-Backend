@@ -5,11 +5,13 @@ from pydantic import BaseModel
 from youtube_transcript_api import YouTubeTranscriptApi
 from fastapi.middleware.cors import CORSMiddleware
 from urllib.parse import urlparse, parse_qs
-from openai import OpenAI
+from langchain.schema import Document
+from langchain.vectorstores import FAISS
+from langchain.embeddings.openai import OpenAIEmbeddings
+from langchain.chains import RetrievalQA
+from langchain_community.chat_models import ChatOpenAI
 
 load_dotenv()
-
-openai=OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 app = FastAPI()
 
@@ -25,11 +27,12 @@ app.add_middleware(
 class URLRequest(BaseModel):
     url: str
 
-    
+
 class QuestionRequest(BaseModel):
-    transcript: str
     question: str
 
+
+# Extract video ID function
 def extract_video_id(url: str) -> str:
     parsed_url = urlparse(url)
     if parsed_url.netloc in ["www.youtube.com", "youtube.com"]:
@@ -40,6 +43,10 @@ def extract_video_id(url: str) -> str:
     return None
 
 
+# FAISS Index (Global to Avoid Rebuilding)
+faiss_index = None
+
+
 @app.get("/")
 def read_root():
     return {"message": "Hello, World!"}
@@ -48,36 +55,41 @@ def read_root():
 @app.post("/connect-url-to-chat")
 def connect_url_to_chat(request: URLRequest):
     try:
+        global faiss_index
+        
+        # Extract YouTube video ID
         video_id = extract_video_id(request.url)
         if not video_id:
             return {"error": "Invalid YouTube URL."}
         
         transcript = YouTubeTranscriptApi.get_transcript(video_id)
         transcript_text = " ".join([i['text'] for i in transcript])
-        return {"transcript": transcript_text}
+
+        documents = [Document(page_content=chunk) for chunk in transcript_text.split(". ")]
+        embeddings = OpenAIEmbeddings()
+        
+        faiss_index = FAISS.from_documents(documents, embeddings)
+        
+        return {"message": "Transcript processed and indexed successfully."}
     except Exception as e:
         return {"error": str(e)}
+
 
 @app.post("/ask-question")
 def ask_question(request: QuestionRequest):
     try:
-        messages = [
-            {'role': 'system', 'content': 'You are a helpful assistant.'},
-            {'role': 'user', 'content': request.transcript},
-            {'role': 'user', 'content': request.question}
-        ]
-
-        response = openai.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=messages,
-            max_tokens=200, 
-            temperature=0.7
-        )
-
-        answer =  response.choices[0].message.content
-        return {"answer": answer}
+        global faiss_index
+        if not faiss_index:
+            return {"error": "No transcript indexed. Please upload a video first."}
+        
+        retriever = faiss_index.as_retriever()
+        llm = ChatOpenAI(temperature=0)
+        qa_chain = RetrievalQA.from_chain_type(llm=llm, retriever=retriever, return_source_documents=True)
+        result = qa_chain({"query": request.question})
+        return {"answer": result["result"]}
     except Exception as e:
         return {"error": str(e)}
+
 
 if __name__ == "__main__":
     import uvicorn
