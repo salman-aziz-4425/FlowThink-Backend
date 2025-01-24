@@ -1,3 +1,4 @@
+from dotenv import load_dotenv
 import os
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -6,8 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from urllib.parse import urlparse, parse_qs
 from openai import OpenAI
 
-print(os.getenv("OPENAI_API_KEY"))
-
+load_dotenv()
 
 openai=OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
