@@ -32,7 +32,6 @@ class QuestionRequest(BaseModel):
     question: str
 
 
-# Extract video ID function
 def extract_video_id(url: str) -> str:
     parsed_url = urlparse(url)
     if parsed_url.netloc in ["www.youtube.com", "youtube.com"]:
@@ -43,13 +42,7 @@ def extract_video_id(url: str) -> str:
     return None
 
 
-# FAISS Index (Global to Avoid Rebuilding)
 faiss_index = None
-
-
-@app.get("/")
-def read_root():
-    return {"message": "Hello, World!"}
 
 
 @app.post("/connect-url-to-chat")
@@ -57,7 +50,6 @@ def connect_url_to_chat(request: URLRequest):
     try:
         global faiss_index
         
-        # Extract YouTube video ID
         video_id = extract_video_id(request.url)
         if not video_id:
             return {"error": "Invalid YouTube URL."}
