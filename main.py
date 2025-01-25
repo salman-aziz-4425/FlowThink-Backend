@@ -7,9 +7,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from urllib.parse import urlparse, parse_qs
 from langchain.schema import Document
 from langchain.vectorstores import FAISS
-from langchain.embeddings.openai import OpenAIEmbeddings
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.chains import RetrievalQA
-from langchain_community.chat_models import ChatOpenAI
+from langchain_community.llms import Ollama
+from langchain_community.embeddings import OllamaEmbeddings
+from langchain_core.prompts import PromptTemplate
 
 load_dotenv()
 
@@ -23,14 +25,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 class URLRequest(BaseModel):
     url: str
 
-
 class QuestionRequest(BaseModel):
     question: str
-
 
 def extract_video_id(url: str) -> str:
     parsed_url = urlparse(url)
@@ -41,12 +40,10 @@ def extract_video_id(url: str) -> str:
         return parsed_url.path.lstrip("/")
     return None
 
-
 faiss_index = None
 
-
 @app.post("/connect-url-to-chat")
-def connect_url_to_chat(request: URLRequest):
+async def connect_url_to_chat(request: URLRequest):
     try:
         global faiss_index
         
@@ -57,8 +54,16 @@ def connect_url_to_chat(request: URLRequest):
         transcript = YouTubeTranscriptApi.get_transcript(video_id)
         transcript_text = " ".join([i['text'] for i in transcript])
 
-        documents = [Document(page_content=chunk) for chunk in transcript_text.split(". ")]
-        embeddings = OpenAIEmbeddings()
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=200
+        )
+        documents = text_splitter.create_documents([transcript_text])
+
+        embeddings = OllamaEmbeddings(
+            base_url='http://localhost:11434',
+            model="llama3.1"
+        )
         
         faiss_index = FAISS.from_documents(documents, embeddings)
         
@@ -66,23 +71,52 @@ def connect_url_to_chat(request: URLRequest):
     except Exception as e:
         return {"error": str(e)}
 
-
 @app.post("/ask-question")
-def ask_question(request: QuestionRequest):
+async def ask_question(request: QuestionRequest):
     try:
         global faiss_index
-        if not faiss_index:
-            return {"error": "No transcript indexed. Please upload a video first."}
         
-        retriever = faiss_index.as_retriever()
-        llm = ChatOpenAI(temperature=0)
-        qa_chain = RetrievalQA.from_chain_type(llm=llm, retriever=retriever, return_source_documents=True)
-        result = qa_chain({"query": request.question})
-        return {"answer": result["result"]}
+        llm = Ollama(
+            base_url='http://localhost:11434',
+            model="llama3.1",
+            temperature=0.2  
+        )
+
+        custom_prompt = PromptTemplate(
+            input_variables=["context", "question"],
+            template="""[INST] <<SYS>>
+            You are a friendly AI assistant. Follow these rules:
+            1. If the question relates to a video, answer using the transcript context
+            2. For greetings or general questions, respond normally
+            3. Be concise and maintain a natural conversation flow
+            4. If unsure, ask for clarification
+            <</SYS>>
+
+            {context}
+
+            Current conversation:
+            User: {question}
+            Assistant: [/INST]"""
+        )
+
+        if faiss_index:
+            retriever = faiss_index.as_retriever()
+            qa_chain = RetrievalQA.from_chain_type(
+                llm=llm,
+                retriever=retriever,
+                chain_type_kwargs={"prompt": custom_prompt},
+                return_source_documents=True
+            )
+            result = qa_chain.invoke({"query": request.question})
+            return {"answer": result["result"]}
+        else:
+            response = llm.invoke(
+                f"[INST] Respond naturally to this: {request.question} [/INST]"
+            )
+            return {"answer": response}
+            
     except Exception as e:
         return {"error": str(e)}
-
-
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000, debug=True)
