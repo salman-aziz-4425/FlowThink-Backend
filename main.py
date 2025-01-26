@@ -29,6 +29,7 @@ class URLRequest(BaseModel):
     url: str
 
 class QuestionRequest(BaseModel):
+    url: str
     question: str
 
 def extract_video_id(url: str) -> str:
@@ -40,18 +41,22 @@ def extract_video_id(url: str) -> str:
         return parsed_url.path.lstrip("/")
     return None
 
-faiss_index = None
+video_indexes = {} 
+
+# Initialize a dictionary to keep conversation history
+conversation_history = {}
 
 @app.post("/connect-url-to-chat")
 async def connect_url_to_chat(request: URLRequest):
     try:
-        global faiss_index
-        
         video_id = extract_video_id(request.url)
         if not video_id:
             return {"error": "Invalid YouTube URL."}
         
-        transcript = YouTubeTranscriptApi.get_transcript(video_id)
+        if video_id in video_indexes:
+            return {"message": "Video already processed and indexed."}
+        
+        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en', 'es', 'fr', 'hi'])
         transcript_text = " ".join([i['text'] for i in transcript])
 
         text_splitter = RecursiveCharacterTextSplitter(
@@ -60,12 +65,18 @@ async def connect_url_to_chat(request: URLRequest):
         )
         documents = text_splitter.create_documents([transcript_text])
 
+        for doc in documents:
+            doc.metadata = {"video_id": video_id}
+
         embeddings = OllamaEmbeddings(
             base_url='http://localhost:11434',
             model="llama3.1"
         )
+    
+        video_indexes[video_id] = FAISS.from_documents(documents, embeddings)
         
-        faiss_index = FAISS.from_documents(documents, embeddings)
+        # Initialize conversation history for the video ID
+        conversation_history[video_id] = []
         
         return {"message": "Transcript processed and indexed successfully."}
     except Exception as e:
@@ -74,8 +85,22 @@ async def connect_url_to_chat(request: URLRequest):
 @app.post("/ask-question")
 async def ask_question(request: QuestionRequest):
     try:
-        global faiss_index
+        video_id = extract_video_id(request.url)
+        if not video_id:
+            return {"error": "Invalid YouTube URL."}
+            
+        if video_id not in video_indexes:
+            return {"error": "Please process the video URL first using /connect-url-to-chat endpoint."}
         
+        # Format conversation history
+        conversation_context = ""
+        if video_id in conversation_history:
+            for entry in conversation_history[video_id]:
+                if "user" in entry:
+                    conversation_context += f"User: {entry['user']}\n"
+                elif "assistant" in entry:
+                    conversation_context += f"Assistant: {entry['assistant']}\n"
+
         llm = Ollama(
             base_url='http://localhost:11434',
             model="llama3.1",
@@ -90,33 +115,42 @@ async def ask_question(request: QuestionRequest):
             2. For greetings or general questions, respond normally
             3. Be concise and maintain a natural conversation flow
             4. If unsure, ask for clarification
+            5. Give the answer in the English translation
             <</SYS>>
 
+            Previous conversation:
             {context}
 
-            Current conversation:
             User: {question}
             Assistant: [/INST]"""
         )
 
-        if faiss_index:
-            retriever = faiss_index.as_retriever()
-            qa_chain = RetrievalQA.from_chain_type(
-                llm=llm,
-                retriever=retriever,
-                chain_type_kwargs={"prompt": custom_prompt},
-                return_source_documents=True
-            )
-            result = qa_chain.invoke({"query": request.question})
-            return {"answer": result["result"]}
-        else:
-            response = llm.invoke(
-                f"[INST] Respond naturally to this: {request.question} [/INST]"
-            )
-            return {"answer": response}
+        retriever = video_indexes[video_id].as_retriever()
+        qa_chain = RetrievalQA.from_chain_type(
+            llm=llm,
+            retriever=retriever,
+            chain_type_kwargs={
+                "prompt": custom_prompt,
+            },
+            return_source_documents=True
+        )
+        
+        # Include conversation history in the context
+        context_with_history = conversation_context if conversation_context else ""
+        
+        result = qa_chain.invoke({
+            "query": request.question,
+            "context": context_with_history,
+        })
+        
+        conversation_history[video_id].append({"user": request.question})
+        conversation_history[video_id].append({"assistant": result["result"]})
+
+        return {"answer": result["result"]}
             
     except Exception as e:
         return {"error": str(e)}
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000, debug=True)
