@@ -58,24 +58,51 @@ async def connect_url_to_chat(request: URLRequest):
             return {"message": "Video already processed and indexed."}
         
         transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
-        transcript_text = " ".join([i['text'] for i in transcript])
+        
+        total_duration = sum([item['duration'] for item in transcript])
+        documents = []
+        current_chunk = []
+        current_chunk_start = transcript[0]['start']
+        
+        for entry in transcript:
+            position = entry['start'] / total_duration
+            category = "beginning" if position < 0.33 else "middle" if position < 0.66 else "end"
+            
+            current_chunk.append(entry['text'])
 
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=2000,
-            chunk_overlap=400
-        )
-        documents = text_splitter.split_documents([Document(page_content=transcript_text)])
-
-        for doc in documents:
-            doc.metadata = {"video_id": video_id}
+            if len(' '.join(current_chunk)) >= 2000:
+                documents.append(
+                    Document(
+                        page_content=' '.join(current_chunk),
+                        metadata={
+                            "start": current_chunk_start,
+                            "end": entry['start'] + entry['duration'],
+                            "category": category,
+                            "video_id": video_id
+                        }
+                    )
+                )
+                current_chunk = []
+                current_chunk_start = entry['start']
+        
+        if current_chunk:
+            documents.append(
+                Document(
+                    page_content=' '.join(current_chunk),
+                    metadata={
+                        "start": current_chunk_start,
+                        "end": transcript[-1]['start'] + transcript[-1]['duration'],
+                        "category": "end",
+                        "video_id": video_id
+                    }
+                )
+            )
 
         embeddings = OllamaEmbeddings(
             base_url='http://localhost:11434',
             model="llama3.1",
         )
 
-        # embeddings =OpenAIEmbeddings()
-    
         video_indexes[video_id] = FAISS.from_documents(documents, embeddings)
         conversation_memories[video_id] = ConversationBufferMemory(
             memory_key="chat_history",
@@ -104,11 +131,6 @@ async def ask_question(request: QuestionRequest):
             temperature=0.2  
         )
 
-        # llm = ChatOpenAI(
-        #     model="gpt-4o",
-        #     temperature=0.2  
-        # )
-
         custom_prompt = PromptTemplate(
             input_variables=["chat_history", "question", "context"],
             template="""[INST] <<SYS>>
@@ -116,11 +138,7 @@ async def ask_question(request: QuestionRequest):
             1. Focus solely on explaining and discussing the video content from the provided context
             2. Consider the conversation history for continuity
             3. Be concise and clear in your responses
-            4. If the question is unclear, ask for clarification about which part of the video they want to understand
-            5. Stay strictly within the scope of the video content
-            6. Answer in English unless asked otherwise
-            7. If the question is not related to the video content, act as a general AI assistant
-            8. Act natural in greetings and other conversations not related to the video content
+            4. Stay strictly within the scope of the video content
             
             Context: {context}
             <</SYS>>
@@ -152,9 +170,20 @@ async def ask_question(request: QuestionRequest):
             {"answer": result["answer"]}
         )
         
+        # Return section details with the response
+        sources = [
+            {
+                "text": doc.page_content,
+                "start": doc.metadata["start"],
+                "end": doc.metadata["end"],
+                "category": doc.metadata["category"]
+            }
+            for doc in result["source_documents"]
+        ]
+        
         return {
             "answer": result["answer"],
-            "sources": list(set([doc.metadata["video_id"] for doc in result["source_documents"]]))
+            "sources": sources
         }
             
     except Exception as e:
