@@ -1,20 +1,22 @@
 from dotenv import load_dotenv
 import os
-from fastapi import FastAPI
-from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, AnyHttpUrl
 from youtube_transcript_api import YouTubeTranscriptApi
 from fastapi.middleware.cors import CORSMiddleware
 from urllib.parse import urlparse, parse_qs
 from langchain.schema import Document
-from langchain.vectorstores import FAISS
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.chains import ConversationalRetrievalChain
-from langchain_community.llms import Ollama
-from langchain_community.embeddings import OllamaEmbeddings
+from langchain_community.vectorstores import FAISS
 from langchain.memory import ConversationBufferMemory
 from langchain_core.prompts import PromptTemplate
-from langchain_openai import OpenAIEmbeddings
-from langchain_openai import ChatOpenAI
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain.chains import ConversationalRetrievalChain
+from langchain_huggingface import HuggingFacePipeline
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from langchain_community.llms import HuggingFaceHub, HuggingFaceEndpoint
+from langchain_community.chat_models.huggingface import ChatHuggingFace
+
+import transformers
 
 load_dotenv()
 
@@ -28,6 +30,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+embeddings = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/all-mpnet-base-v2"
+)
+
+# mixtral_llm = HuggingFacePipeline(pipeline=text_generation_pipeline)
+
 class URLRequest(BaseModel):
     url: str
 
@@ -36,13 +45,16 @@ class QuestionRequest(BaseModel):
     question: str
 
 def extract_video_id(url: str) -> str:
-    parsed_url = urlparse(url)
-    if parsed_url.netloc in ["www.youtube.com", "youtube.com"]:
-        query_params = parse_qs(parsed_url.query)
-        return query_params.get("v", [None])[0]
-    elif parsed_url.netloc in ["youtu.be"]:
-        return parsed_url.path.lstrip("/")
-    return None
+    try:
+        parsed_url = urlparse(str(url))
+        if parsed_url.netloc in ["www.youtube.com", "youtube.com"]:
+            query_params = parse_qs(parsed_url.query)
+            return query_params.get("v", [None])[0]
+        elif parsed_url.netloc in ["youtu.be"]:
+            return parsed_url.path.lstrip("/")
+        return None
+    except Exception as e:
+        raise HTTPException(status_code=400, detail="Invalid URL format")
 
 video_indexes = {}
 conversation_memories = {}
@@ -98,11 +110,6 @@ async def connect_url_to_chat(request: URLRequest):
                 )
             )
 
-        embeddings = OllamaEmbeddings(
-            base_url='http://localhost:11434',
-            model="llama3.1",
-        )
-
         video_indexes[video_id] = FAISS.from_documents(documents, embeddings)
         conversation_memories[video_id] = ConversationBufferMemory(
             memory_key="chat_history",
@@ -124,21 +131,14 @@ async def ask_question(request: QuestionRequest):
             
         if video_id not in video_indexes:
             return {"error": "Please process the video URL first using /connect-url-to-chat endpoint."}
-
-        llm = Ollama(
-            base_url='http://localhost:11434',
-            model="llama3.1",
-            temperature=0.2  
-        )
-
+        
         custom_prompt = PromptTemplate(
             input_variables=["chat_history", "question", "context"],
             template="""[INST] <<SYS>>
             You are a friendly AI assistant. In general conversations, act naturally. When users ask about YouTube video content, follow these rules:
             1. Focus solely on explaining and discussing the video content from the provided context
-            2. Consider the conversation history for continuity
-            3. Be concise and clear in your responses
-            4. Stay strictly within the scope of the video content
+            2. Be concise and clear in your responses
+            3. Stay strictly within the scope of the video content
             
             Context: {context}
             <</SYS>>
@@ -152,6 +152,16 @@ async def ask_question(request: QuestionRequest):
 
         retriever = video_indexes[video_id].as_retriever(search_kwargs={"k": 4})
         
+        llm = HuggingFaceEndpoint(
+            endpoint_url="https://api-inference.huggingface.co/models/mistralai/Mixtral-8x7B-Instruct-v0.1",
+            huggingfacehub_api_token=os.getenv("HUGGINGFACE_API_TOKEN"),
+            task="text-generation",
+            max_new_tokens=512,
+            temperature=0.1,
+            top_p=0.95,
+            repetition_penalty=1.03
+        )
+
         qa_chain = ConversationalRetrievalChain.from_llm(
             llm=llm,
             retriever=retriever,
@@ -169,8 +179,7 @@ async def ask_question(request: QuestionRequest):
             {"question": request.question},
             {"answer": result["answer"]}
         )
-        
-        # Return section details with the response
+
         sources = [
             {
                 "text": doc.page_content,
@@ -195,6 +204,7 @@ async def health_check():
         "status": "healthy",
         "message": "Service is running"
     }
+
 
 if __name__ == "__main__":
     import uvicorn
