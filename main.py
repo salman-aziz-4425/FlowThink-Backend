@@ -189,6 +189,12 @@ async def ask_question(request: QuestionRequest):
     except Exception as e:
         return {"error": str(e)}
 
+@app.get("/health")
+async def health_check():
+    return {
+        "status": "healthy",
+        "message": "Service is running"
+    }
 
 if __name__ == "__main__":
     import uvicorn
