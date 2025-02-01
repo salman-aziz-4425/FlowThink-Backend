@@ -189,7 +189,7 @@ async def ask_question(request: QuestionRequest):
     except Exception as e:
         return {"error": str(e)}
 
-@app.get("/health")
+@app.get("/")
 async def health_check():
     return {
         "status": "healthy",
