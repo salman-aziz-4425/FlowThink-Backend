@@ -3,24 +3,28 @@
     "builds": [
         {
             "src": "main.py",
-            "use": "@vercel/python"
+            "use": "@vercel/python",
+            "config": {
+                "runtime": "python3.9",
+                "maxLambdaSize": "15mb"
+            }
         }
     ],
     "rewrites": [
         {
             "source": "/(.*)",
-            "destination": "main.py"
+            "destination": "/main.py"
         }
     ],
     "headers": [
         {
-          "source": "/(.*)",
-          "headers": [
-            { "key": "Access-Control-Allow-Origin", "value": "*" },
-            { "key": "Access-Control-Allow-Methods", "value": "GET, POST, PUT, DELETE, OPTIONS" },
-            { "key": "Access-Control-Allow-Headers", "value": "*" },
-            { "key": "Access-Control-Allow-Credentials", "value": "true" }
-          ]
+            "source": "/(.*)",
+            "headers": [
+                { "key": "Access-Control-Allow-Origin", "value": "*" },
+                { "key": "Access-Control-Allow-Methods", "value": "GET, POST, PUT, DELETE, OPTIONS" },
+                { "key": "Access-Control-Allow-Headers", "value": "*" },
+                { "key": "Access-Control-Allow-Credentials", "value": "true" }
+            ]
         }
     ]
 }

@@ -1,6 +1,6 @@
 from dotenv import load_dotenv
 import os
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, AnyHttpUrl
 from youtube_transcript_api import YouTubeTranscriptApi
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,7 +26,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Allow all origins (change to specific domains if needed)
     allow_credentials=True,  # Allows cookies/auth headers
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],  # Explicitly define methods
+    allow_methods=["*"],  # Explicitly define methods
     allow_headers=["*"],  # Allow all headers
 )
 
@@ -202,10 +202,6 @@ async def ask_question(request: QuestionRequest):
 async def health_check():
     return {
         "status": "healthy",
-        "message": "Service is running"
+        "message": "Service is running",
+        "environment": os.environ.get("VERCEL_ENV", "local")
     }
-
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
