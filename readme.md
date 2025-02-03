@@ -40,16 +40,3 @@ This is a FastAPI application that allows users to upload YouTube video URLs and
    ```
 
 2. Access the API documentation at `http://localhost:8000/docs`.
-
-## Endpoints
-
-### `GET /`
-
-Returns a simple greeting message.
-
-**Response:**
-```json
-{
-  "message": "Welcome to the YouTube Transcript Chatbot!"
-}
-```
