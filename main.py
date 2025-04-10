@@ -1,22 +1,13 @@
 from dotenv import load_dotenv
 import os
-from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel, AnyHttpUrl
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 from youtube_transcript_api import YouTubeTranscriptApi
 from fastapi.middleware.cors import CORSMiddleware
 from urllib.parse import urlparse, parse_qs
-from langchain.schema import Document
-from langchain_community.vectorstores import FAISS
 from langchain.memory import ConversationBufferMemory
 from langchain_core.prompts import PromptTemplate
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain.chains import ConversationalRetrievalChain
-from langchain_huggingface import HuggingFacePipeline
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from langchain_community.llms import HuggingFaceHub, HuggingFaceEndpoint
-from langchain_community.chat_models.huggingface import ChatHuggingFace
-
-import transformers
+from langchain_community.llms import HuggingFaceEndpoint
 
 load_dotenv()
 
@@ -24,18 +15,11 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins (change to specific domains if needed)
-    allow_credentials=True,  # Allows cookies/auth headers
-    allow_methods=["*"],  # Explicitly define methods
-    allow_headers=["*"],  # Allow all headers
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
-
-
-embeddings = HuggingFaceEmbeddings(
-    model_name="sentence-transformers/all-mpnet-base-v2"
-)
-
-# mixtral_llm = HuggingFacePipeline(pipeline=text_generation_pipeline)
 
 class URLRequest(BaseModel):
     url: str
@@ -56,8 +40,40 @@ def extract_video_id(url: str) -> str:
     except Exception as e:
         raise HTTPException(status_code=400, detail="Invalid URL format")
 
-video_indexes = {}
+video_summaries = {}
 conversation_memories = {}
+
+def create_llm():
+    return HuggingFaceEndpoint(
+        endpoint_url="https://api-inference.huggingface.co/models/mistralai/Mixtral-8x7B-Instruct-v0.1",
+        huggingfacehub_api_token=os.getenv("HUGGINGFACE_API_TOKEN"),
+        task="text-generation",
+        max_new_tokens=512,
+        temperature=0.1,
+        top_p=0.95,
+        repetition_penalty=1.03
+    )
+
+def generate_summary(text: str, llm) -> str:
+    summary_prompt = PromptTemplate(
+        input_variables=["text"],
+        template="""[INST] <<SYS>>
+        You are a precise and engaging summarizer. Your goal is to:
+        1. Create a detailed yet concise summary that captures the essence of the content
+        2. Preserve key points, examples, and important details
+        3. Structure the summary in a way that makes it easy to reference later
+        4. Include any notable quotes or specific data points
+        5. Maintain the original tone and style of the content
+        <</SYS>>
+
+        Here is the text to summarize:
+        {text}
+
+        Please provide a well-structured summary that captures the main points and key details: [/INST]"""
+    )
+    
+    chain = summary_prompt | llm
+    return chain.invoke({"text": text})
 
 @app.post("/connect-url-to-chat")
 async def connect_url_to_chat(request: URLRequest):
@@ -66,51 +82,29 @@ async def connect_url_to_chat(request: URLRequest):
         if not video_id:
             return {"error": "Invalid YouTube URL."}
         
-        if video_id in video_indexes:
-            return {"message": "Video already processed and indexed."}
+        if video_id in video_summaries:
+            return {"message": "Video already processed and summarized."}
         
         transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
+        full_text = " ".join([entry['text'] for entry in transcript])
         
-        total_duration = sum([item['duration'] for item in transcript])
-        documents = []
-        current_chunk = []
-        current_chunk_start = transcript[0]['start']
+        llm = create_llm()
         
-        for entry in transcript:
-            position = entry['start'] / total_duration
-            category = "beginning" if position < 0.33 else "middle" if position < 0.66 else "end"
+        # If transcript is too long, create sub-summaries
+        if len(full_text) > 6000:  # Assuming ~6000 chars as a safe context length
+            chunks = [full_text[i:i + 6000] for i in range(0, len(full_text), 6000)]
+            sub_summaries = []
             
-            current_chunk.append(entry['text'])
-
-            if len(' '.join(current_chunk)) >= 2000:
-                documents.append(
-                    Document(
-                        page_content=' '.join(current_chunk),
-                        metadata={
-                            "start": current_chunk_start,
-                            "end": entry['start'] + entry['duration'],
-                            "category": category,
-                            "video_id": video_id
-                        }
-                    )
-                )
-                current_chunk = []
-                current_chunk_start = entry['start']
+            for chunk in chunks:
+                sub_summary = generate_summary(chunk, llm)
+                sub_summaries.append(sub_summary)
+            
+            # Create final summary from sub-summaries
+            final_summary = generate_summary(" ".join(sub_summaries), llm)
+        else:
+            final_summary = generate_summary(full_text, llm)
         
-        if current_chunk:
-            documents.append(
-                Document(
-                    page_content=' '.join(current_chunk),
-                    metadata={
-                        "start": current_chunk_start,
-                        "end": transcript[-1]['start'] + transcript[-1]['duration'],
-                        "category": "end",
-                        "video_id": video_id
-                    }
-                )
-            )
-
-        video_indexes[video_id] = FAISS.from_documents(documents, embeddings)
+        video_summaries[video_id] = final_summary
         conversation_memories[video_id] = ConversationBufferMemory(
             memory_key="chat_history",
             input_key="question",
@@ -118,7 +112,7 @@ async def connect_url_to_chat(request: URLRequest):
             return_messages=True
         )
         
-        return {"message": "Transcript processed and indexed successfully."}
+        return {"message": "Video processed and summarized successfully."}
     except Exception as e:
         return {"error": str(e)}
 
@@ -129,70 +123,63 @@ async def ask_question(request: QuestionRequest):
         if not video_id:
             return {"error": "Invalid YouTube URL."}
             
-        if video_id not in video_indexes:
+        if video_id not in video_summaries:
             return {"error": "Please process the video URL first using /connect-url-to-chat endpoint."}
         
-        custom_prompt = PromptTemplate(
-            input_variables=["chat_history", "question", "context"],
+        qa_prompt = PromptTemplate(
+            input_variables=["chat_history", "question", "summary"],
             template="""[INST] <<SYS>>
-            You are a friendly AI assistant. In general conversations, act naturally. When users ask about YouTube video content, follow these rules:
-            1. Focus solely on explaining and discussing the video content from the provided context
-            2. Be concise and clear in your responses
-            3. Stay strictly within the scope of the video content
-            
-            Context: {context}
+            You are a friendly and attentive AI assistant who helps users understand video content. Follow these guidelines:
+
+            1. Conversation Style:
+               - Keep responses natural and conversational
+               - Use a friendly, engaging tone
+               - Acknowledge user's questions and comments appropriately
+               - Handle greetings and casual conversation naturally
+
+            2. Question Handling:
+               - Only provide information from the video summary when explicitly asked
+               - For general chat or greetings, respond naturally without referencing the video
+               - If a question is unclear, ask for clarification
+               - If a question can't be answered from the summary, politely say so
+
+            3. Response Format:
+               - Keep answers concise but informative
+               - Break down complex answers into digestible parts
+               - Use natural transitions between points
+               - Reference specific parts of the video when relevant
+
+            Video Summary for Reference:
+            {summary}
             <</SYS>>
 
-            Conversation History:
+            Previous Conversation:
             {chat_history}
 
-            Question: {question}
-            Answer: [/INST]"""
+            User: {question}
+            Assistant: [/INST]"""
         )
 
-        retriever = video_indexes[video_id].as_retriever(search_kwargs={"k": 4})
+        llm = create_llm()
         
-        llm = HuggingFaceEndpoint(
-            endpoint_url="https://api-inference.huggingface.co/models/mistralai/Mixtral-8x7B-Instruct-v0.1",
-            huggingfacehub_api_token=os.getenv("HUGGINGFACE_API_TOKEN"),
-            task="text-generation",
-            max_new_tokens=512,
-            temperature=0.1,
-            top_p=0.95,
-            repetition_penalty=1.03
+        chat_history = conversation_memories[video_id].load_memory_variables({})["chat_history"]
+        
+        response = qa_prompt.format(
+            summary=video_summaries[video_id],
+            chat_history=chat_history,
+            question=request.question
         )
-
-        qa_chain = ConversationalRetrievalChain.from_llm(
-            llm=llm,
-            retriever=retriever,
-            memory=conversation_memories[video_id],
-            combine_docs_chain_kwargs={"prompt": custom_prompt},
-            return_source_documents=True,
-            output_key="answer",
-            return_generated_question=False,
-            chain_type="stuff"
-        )
-
-        result = qa_chain({"question": request.question})
+        
+        answer = llm.invoke(response)
         
         conversation_memories[video_id].save_context(
             {"question": request.question},
-            {"answer": result["answer"]}
+            {"answer": answer}
         )
-
-        sources = [
-            {
-                "text": doc.page_content,
-                "start": doc.metadata["start"],
-                "end": doc.metadata["end"],
-                "category": doc.metadata["category"]
-            }
-            for doc in result["source_documents"]
-        ]
         
         return {
-            "answer": result["answer"],
-            "sources": sources
+            "answer": answer,
+            "summary": video_summaries[video_id]  # Including summary for transparency
         }
             
     except Exception as e:
@@ -205,3 +192,9 @@ async def health_check():
         "message": "Service is running",
         "environment": os.environ.get("VERCEL_ENV", "local")
     }
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+
+

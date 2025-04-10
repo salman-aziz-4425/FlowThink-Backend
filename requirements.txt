@@ -3,10 +3,5 @@ uvicorn
 youtube-transcript-api
 langchain
 langchain-community
-langchain-openai
 python-dotenv
-openai
 pydantic
-sentence-transformers
-langchain-mistralai
-langchain-huggingface
